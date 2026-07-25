@@ -1,0 +1,11 @@
+langchain
+langchain_groq
+langchain_core
+langchain_core
+langchain_text_splitters
+validators
+youtube_transcript_api
+pytube
+unstructured
+
+edge_tts
