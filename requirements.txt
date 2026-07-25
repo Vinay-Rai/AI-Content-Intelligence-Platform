@@ -9,3 +9,4 @@ pytube
 unstructured
 streamlit
 edge_tts
+langchain_community
