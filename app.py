@@ -14,9 +14,9 @@ from langchain_community.document_loaders import (
     UnstructuredURLLoader,
 )
 
-# -----------------------------
+
 # Cache LLM
-# -----------------------------
+
 @st.cache_resource
 def get_llm(api_key):
     return ChatGroq(
@@ -24,9 +24,8 @@ def get_llm(api_key):
         model="llama-3.3-70b-versatile"
     )
 
-# -----------------------------
 # Streamlit Config
-# -----------------------------
+
 st.set_page_config(
     page_title="AI Website & YouTube Summarizer",
     page_icon="🦜",
@@ -36,9 +35,9 @@ st.set_page_config(
 st.title("🦜 AI Website & YouTube Summarizer")
 st.subheader("Summarize any YouTube Video or Website")
 
-# -----------------------------
+
 # Sidebar
-# -----------------------------
+
 with st.sidebar:
 
     st.header("Settings")
@@ -75,17 +74,11 @@ generic_url = st.text_input(
     "Enter YouTube or Website URL"
 )
 
-# # -----------------------------
-# # LLM
-# # -----------------------------
-# llm = ChatGroq(
-#     groq_api_key=groq_api_key,
-#     model="llama-3.3-70b-versatile",
-# )
 
-# -----------------------------
+
+
 # Prompt
-# -----------------------------
+
 prompt = ChatPromptTemplate.from_template(
     """
 You are an expert summarizer.
@@ -105,9 +98,9 @@ Content:
 """
 )
 
-# -----------------------------
+
 # Text to Speech
-# -----------------------------
+
 async def generate_audio(
     text,
     voice_name,
@@ -150,9 +143,9 @@ def clean_text_for_tts(text):
 
     return text.strip()
 
-# -----------------------------
+
 # Button
-# -----------------------------
+
 if st.button("Generate Summary"):
 
     if not groq_api_key.strip():
@@ -223,9 +216,9 @@ if st.button("Generate Summary"):
 
             st.write(summary)
 
-            # -----------------------
+            
             # Generate Audio
-            # -----------------------
+            
             with st.spinner("Generating Audio..."):
 
                 audio_file = "summary.mp3"

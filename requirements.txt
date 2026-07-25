@@ -7,5 +7,5 @@ validators
 youtube_transcript_api
 pytube
 unstructured
-
+streamlit
 edge_tts
