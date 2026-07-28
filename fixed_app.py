@@ -13,8 +13,8 @@ from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import UnstructuredURLLoader
 
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import GenericProxyConfig
+import tempfile
+import yt_dlp
 
 
 # Cache LLM
@@ -143,9 +143,10 @@ def clean_text_for_tts(text):
     return text.strip()
 
 
-# YouTube transcript loading via youtube_transcript_api, routed through the
-# Webshare residential proxy (required on cloud hosting since YouTube blocks
-# datacenter IPs from hitting the transcript endpoint directly).
+# YouTube transcript loading via yt-dlp's subtitle download (auto-generated
+# captions), routed through the Webshare proxy. This avoids the
+# youtube_transcript_api caption endpoint, which gets IP-blocked separately
+# and more aggressively than yt-dlp's general video-info access.
 
 def _get_secret(key):
     try:
@@ -156,47 +157,104 @@ def _get_secret(key):
     return os.environ.get(key)
 
 
-def extract_video_id(url):
-    match = re.search(r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})", url)
-    return match.group(1) if match else None
+def _build_proxy_url():
+    webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
+    webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
+    proxy_endpoint = _get_secret("WEBSHARE_PROXY_ENDPOINT") or "31.59.20.176:6754"
+
+    if not (webshare_user and webshare_pass):
+        return None
+
+    from urllib.parse import quote
+
+    encoded_user = quote(webshare_user, safe="")
+    encoded_pass = quote(webshare_pass, safe="")
+    return f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
+
+
+def _vtt_to_text(vtt_path):
+    """Strip VTT timing/formatting down to plain, deduplicated text."""
+    with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    text_lines = []
+    seen = set()
+
+    for line in lines:
+        line = line.strip()
+
+        if not line:
+            continue
+        if line.startswith("WEBVTT"):
+            continue
+        if line.startswith(("Kind:", "Language:", "NOTE")):
+            continue
+        if "-->" in line:
+            continue
+        if re.match(r"^\d+$", line):
+            continue
+
+        # Strip inline timestamp tags like <00:00:01.234> and formatting tags
+        line = re.sub(r"<[^>]+>", "", line).strip()
+
+        if not line:
+            continue
+
+        # Auto-generated captions repeat the same line across overlapping
+        # windows; skip consecutive duplicates.
+        if line not in seen:
+            text_lines.append(line)
+            seen.add(line)
+
+    return " ".join(text_lines)
 
 
 def load_youtube_transcript(url, api_key=None):
-    video_id = extract_video_id(url)
-    if not video_id:
-        raise ValueError("Could not extract a video ID from that URL.")
+    with tempfile.TemporaryDirectory() as workdir:
+        output_template = os.path.join(workdir, "subs.%(ext)s")
 
-    webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
-    webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
-    # Use the specific proxy endpoint confirmed working in your Webshare
-    # dashboard (Proxy -> List). If it stops working later, the proxy was
-    # likely rotated out — grab a fresh IP:port from the dashboard and
-    # update the WEBSHARE_PROXY_ENDPOINT secret.
-    proxy_endpoint = _get_secret("WEBSHARE_PROXY_ENDPOINT") or "31.59.20.176:6754"
+        ydl_opts = {
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en"],
+            "subtitlesformat": "vtt",
+            "outtmpl": output_template,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "web"],
+                }
+            },
+        }
 
-    if webshare_user and webshare_pass:
-        from urllib.parse import quote
-
-        encoded_user = quote(webshare_user, safe="")
-        encoded_pass = quote(webshare_pass, safe="")
-        proxy_url = f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
-
-        ytt_api = YouTubeTranscriptApi(
-            proxy_config=GenericProxyConfig(
-                http_url=proxy_url,
-                https_url=proxy_url,
+        proxy_url = _build_proxy_url()
+        if proxy_url:
+            ydl_opts["proxy"] = proxy_url
+        else:
+            st.warning(
+                "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
+                "WEBSHARE_PROXY_PASSWORD). YouTube requests from cloud hosting "
+                "will likely be blocked without a proxy."
             )
-        )
-    else:
-        st.warning(
-            "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
-            "WEBSHARE_PROXY_PASSWORD). YouTube transcript requests from cloud "
-            "hosting will likely be rate-limited (429) without a proxy."
-        )
-        ytt_api = YouTubeTranscriptApi()
 
-    transcript = ytt_api.fetch(video_id)
-    text = " ".join(snippet.text for snippet in transcript)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        vtt_files = [
+            f for f in os.listdir(workdir) if f.endswith(".vtt")
+        ]
+
+        if not vtt_files:
+            raise RuntimeError(
+                "No subtitles/captions were found for this video "
+                "(it may not have English captions available)."
+            )
+
+        vtt_path = os.path.join(workdir, vtt_files[0])
+        text = _vtt_to_text(vtt_path)
 
     return [Document(page_content=text, metadata={"source": url})]
 

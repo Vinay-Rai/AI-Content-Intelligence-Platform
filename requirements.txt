@@ -9,4 +9,5 @@ unstructured
 streamlit
 edge_tts
 langchain_community
-youtube_transcript_api
+# youtube_transcript_api
+yt-dlp
