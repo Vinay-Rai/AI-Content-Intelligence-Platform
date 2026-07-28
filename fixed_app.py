@@ -13,8 +13,9 @@ from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import UnstructuredURLLoader
 
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api.proxies import WebshareProxyConfig
+import tempfile
+import yt_dlp
+from groq import Groq
 
 
 # Cache LLM
@@ -143,50 +144,73 @@ def clean_text_for_tts(text):
     return text.strip()
 
 
-# YouTube transcript loading (proxy-enabled, to survive cloud-provider IP blocks)
+# YouTube transcript loading via audio download + Groq Whisper transcription.
+# This avoids YouTube's transcript/caption endpoint entirely (the thing that
+# was getting IP-blocked / 429'd), by downloading the audio track and
+# transcribing it ourselves.
 
-def extract_video_id(url):
-    match = re.search(r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})", url)
-    return match.group(1) if match else None
+# Groq's free-tier audio endpoint caps uploaded files at 25 MB, which is
+# roughly 30-40 minutes of compressed mono audio. Adjust if you're on a
+# paid Groq tier with a higher limit.
+MAX_AUDIO_MB = 25
 
 
-def load_youtube_transcript(url):
-    video_id = extract_video_id(url)
-    if not video_id:
-        raise ValueError("Could not extract a video ID from that URL.")
+def download_youtube_audio(url, workdir):
+    output_template = os.path.join(workdir, "audio.%(ext)s")
 
-    # If Webshare proxy credentials are set (as Streamlit secrets or env vars),
-    # route the request through them. This is required on most cloud hosts
-    # (Streamlit Cloud, AWS, GCP, etc.) since YouTube blocks those IP ranges
-    # outright. Locally, it usually works fine without a proxy.
-    def _get_secret(key):
-        try:
-            if key in st.secrets:
-                return st.secrets[key]
-        except Exception:
-            pass
-        return os.environ.get(key)
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "64",  # smaller file, plenty for speech
+            }
+        ],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
 
-    webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
-    webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
-    if webshare_user and webshare_pass:
-        ytt_api = YouTubeTranscriptApi(
-            proxy_config=WebshareProxyConfig(
-                proxy_username=webshare_user,
-                proxy_password=webshare_pass,
-            )
+    audio_path = os.path.join(workdir, "audio.mp3")
+    if not os.path.exists(audio_path):
+        raise RuntimeError("Audio download did not produce an output file.")
+
+    size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    if size_mb > MAX_AUDIO_MB:
+        raise RuntimeError(
+            f"Downloaded audio is {size_mb:.1f} MB, which exceeds the "
+            f"{MAX_AUDIO_MB} MB limit for transcription. Try a shorter video."
         )
-    else:
-        st.warning(
-            "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
-            "WEBSHARE_PROXY_PASSWORD). YouTube transcript requests from cloud "
-            "hosting will likely be rate-limited (429) without a proxy."
-        )
-        ytt_api = YouTubeTranscriptApi()
 
-    transcript = ytt_api.fetch(video_id)
-    text = " ".join(snippet.text for snippet in transcript)
+    return audio_path
+
+
+def transcribe_audio_with_groq(audio_path, api_key):
+    client = Groq(api_key=api_key)
+
+    with open(audio_path, "rb") as f:
+        transcription = client.audio.transcriptions.create(
+            file=(os.path.basename(audio_path), f.read()),
+            model="whisper-large-v3-turbo",
+            response_format="text",
+        )
+
+    # response_format="text" returns a plain string in recent groq SDK
+    # versions; fall back to .text if a structured object is returned.
+    if isinstance(transcription, str):
+        return transcription
+    return getattr(transcription, "text", str(transcription))
+
+
+def load_youtube_transcript(url, api_key):
+    with tempfile.TemporaryDirectory() as workdir:
+        audio_path = download_youtube_audio(url, workdir)
+        text = transcribe_audio_with_groq(audio_path, api_key)
 
     return [Document(page_content=text, metadata={"source": url})]
 
@@ -214,7 +238,8 @@ if st.button("Generate Summary"):
                     "youtube.com" in generic_url
                     or "youtu.be" in generic_url
                 ):
-                    docs = load_youtube_transcript(generic_url)
+                    with st.spinner("Downloading audio and transcribing..."):
+                        docs = load_youtube_transcript(generic_url, groq_api_key)
 
                 else:
                     loader = UnstructuredURLLoader(

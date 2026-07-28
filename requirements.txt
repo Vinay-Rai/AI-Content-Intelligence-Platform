@@ -4,9 +4,11 @@ langchain_core
 langchain_core
 langchain_text_splitters
 validators
-youtube_transcript_api
 pytube
 unstructured
 streamlit
 edge_tts
 langchain_community
+
+yt-dlp
+groq
