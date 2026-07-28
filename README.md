@@ -1,157 +1,152 @@
-# 🧠 AI-Content-Intelligence-Platform
+# 🦜 AI Website & YouTube Summarizer
 
+Paste in any website URL or YouTube link and get back a clean, bullet-pointed summary — plus a natural-sounding audio version you can play or download. Built with Streamlit, LangChain, and Groq's LLaMA 3.3.
 
-An AI-powered content intelligence application that summarizes **YouTube
-videos** and **web pages** into concise, easy-to-understand summaries
-and can convert those summaries into **natural-sounding downloadable MP3
-audio**.
-
-Built with **LangChain**, **Groq Llama 3.3**, **Streamlit**, and
-**Microsoft Edge Neural Text-to-Speech**, InsightAI helps users consume
-long-form content in minutes.
-
-------------------------------------------------------------------------
+---
 
 ## ✨ Features
 
--   🎥 Summarize YouTube videos using transcripts
--   🌐 Summarize website content from URLs
--   🤖 AI-powered summarization with Groq Llama 3.3
--   🔊 Generate downloadable MP3 audio summaries
--   🎙️ Multiple neural voice options
--   ⚡ Adjustable speech speed
--   ▶️ In-app audio playback
--   ✅ URL validation and robust error handling
--   💻 Clean Streamlit interface
+- 🌐 **Website summarization** — paste any article/blog URL and get a concise, structured summary
+- 📺 **YouTube summarization** — paste a video link and get a summary of its spoken content, no manual transcript needed
+- 🔊 **Audio summaries** — every summary is converted into natural-sounding speech (multiple voice/accent options) that you can play in-browser or download as an MP3
+- ⚡ Powered by **Groq's LLaMA 3.3 70B** for fast, high-quality summarization
+- 🎙️ Text-to-speech via **edge-tts**, speech-to-text via **Groq Whisper**
 
-------------------------------------------------------------------------
+---
 
 ## 🛠️ Tech Stack
 
-Technologies
-  ---------------- --------------------------------------------------
-Python,
-Streamlit,
-LangChain (LCEL),
-Groq Llama 3.3-70B, 
-UnstructuredURLLoader,
-YouTube Loader,    
-Microsoft Edge TTS,
-validators
+| Layer | Technology |
+|---|---|
+| UI / App framework | [Streamlit](https://streamlit.io) |
+| LLM orchestration | [LangChain](https://www.langchain.com) |
+| Summarization model | Groq — LLaMA 3.3 70B Versatile |
+| YouTube audio extraction | [yt-dlp](https://github.com/yt-dlp/yt-dlp) |
+| Speech-to-text | Groq Whisper (`whisper-large-v3-turbo`) |
+| Text-to-speech | [edge-tts](https://github.com/rany2/edge-tts) |
+| Website content extraction | `unstructured` (via LangChain), with a `requests` + `BeautifulSoup` fallback |
+| Proxy (cloud deployment) | Webshare residential proxy |
 
-------------------------------------------------------------------------
+---
 
-## 📌 Workflow
+## 🧠 How It Works
 
-``` text
-User URL
-   │
-   ▼
-Detect Source
-   │
-   ├── YouTube Transcript
-   └── Website Extraction
-            │
-            ▼
-      LangChain Pipeline
-            │
-            ▼
-     Groq Llama 3.3 Summary
-            │
-      ┌─────┴─────┐
-      ▼           ▼
- Text Summary   MP3 Audio
-      │           │
-      └─────┬─────┘
-            ▼
-      Streamlit Interface
+```
+User pastes URL
+      │
+      ├── YouTube link? ──► yt-dlp downloads audio ──► Groq Whisper transcribes it
+      │
+      └── Website link?  ──► UnstructuredURLLoader extracts text
+                              (falls back to requests + BeautifulSoup if empty)
+      │
+      ▼
+LangChain prompt ──► Groq LLaMA 3.3 ──► Bullet-point summary
+      │
+      ▼
+edge-tts converts summary to speech ──► Playable / downloadable MP3
 ```
 
-------------------------------------------------------------------------
+### Why audio download instead of YouTube's transcript API?
 
-## 🚀 Installation
+YouTube aggressively rate-limits and IP-blocks its caption/transcript endpoint, especially from cloud-hosted apps (AWS, GCP, Azure, and by extension most PaaS platforms like Streamlit Cloud). After testing multiple approaches — the official transcript API, `yt-dlp`'s subtitle downloader, and various proxy configurations — the most reliable path turned out to be downloading the audio track (a far less aggressively policed endpoint) and transcribing it directly with Whisper. This trades a bit of speed for significantly better reliability in production.
 
-### Clone the repository
+---
 
-``` bash
+## 📦 Setup
+
+### 1. Clone the repo
+
+```bash
 git clone https://github.com/Vinay-Rai/AI-Content-Intelligence-Platform
 cd AI-Content-Intelligence-Platform
 ```
 
-### Create a virtual environment
+### 2. Install Python dependencies
 
-``` bash
-python -m venv venv
-```
-
-Activate it:
-
-**Windows**
-
-``` bash
-venv\Scripts\activate
-```
-
-**macOS/Linux**
-
-``` bash
-source venv/bin/activate
-```
-
-### Install dependencies
-
-``` bash
+```bash
 pip install -r requirements.txt
 ```
 
-### Run the application
+### 3. Install `ffmpeg` (required for audio extraction)
 
-``` bash
+- **Windows**: [Download from ffmpeg.org](https://ffmpeg.org/download.html), or `choco install ffmpeg`
+- **macOS**: `brew install ffmpeg`
+- **Linux (Debian/Ubuntu)**: `sudo apt install ffmpeg`
+
+Verify with:
+```bash
+ffmpeg -version
+```
+
+### 4. Get a Groq API key
+
+Sign up at [console.groq.com](https://console.groq.com) and generate an API key. You'll paste this into the app's sidebar at runtime — it's not stored anywhere.
+
+### 5. Run locally
+
+```bash
 streamlit run app.py
 ```
 
-------------------------------------------------------------------------
+---
 
-## 📖 How to Use
+## ☁️ Deploying to Streamlit Cloud
 
-1.  Launch the Streamlit application.
-2.  Enter your **Groq API Key**.
-3.  Paste a YouTube or Website URL.
-4.  Click **Generate Summary**.
-5.  Read the AI-generated summary.
-6.  Listen using the built-in audio player.
-7.  Download the MP3 summary.
+Cloud-hosted apps run on data center IPs, which YouTube blocks more aggressively than residential IPs. To keep YouTube summarization working in production, this app routes those specific requests through a residential proxy.
 
-------------------------------------------------------------------------
+### Required files
 
-## 📂 Project Structure
+- **`requirements.txt`** — Python dependencies
+- **`packages.txt`** — system-level dependencies (must contain `ffmpeg`)
 
-``` text
-InsightAI/
-│
-├── app.py
-├── requirements.txt
-├── README.md
-├── generated_audio/
+### Required secrets
 
+In your Streamlit Cloud app → **Settings → Secrets**, add:
+
+```toml
+WEBSHARE_PROXY_USERNAME = "your-webshare-proxy-username"
+WEBSHARE_PROXY_PASSWORD = "your-webshare-proxy-password"
+WEBSHARE_PROXY_ENDPOINT = "your-proxy-ip:port"   # optional, has a fallback default
 ```
 
-------------------------------------------------------------------------
+Get these from your [Webshare](https://www.webshare.io) dashboard under **Proxy → List** (use a specific allocated IP:port, and make sure your account's authentication mode is set to **Username/Password**, not IP whitelisting).
 
-## 🌟 Future Enhancements
+> ⚠️ Without proxy credentials, the app will still run, but YouTube link summarization will likely fail on cloud hosting due to IP blocking. It works fine locally without a proxy.
 
--   Chat with YouTube videos and websites (RAG)
--   Multi-language summaries
--   PDF & DOCX export
--   AI-generated quizzes and flashcards
--   Keyword extraction
--   Timestamp-aware video summaries
--   Summary history
--   Multiple LLM providers
+---
 
-------------------------------------------------------------------------
+## 📁 Project Structure
 
-## 👨‍💻 Author
+```
+.
+├── fixed_app.py              # Main Streamlit application
+├── requirements.txt    # Python dependencies
+├── packages.txt         # System dependencies (ffmpeg) for Streamlit Cloud
+└── README.md
+```
+
+---
+
+## ⚠️ Known Limitations
+
+- **25 MB audio cap** for YouTube transcription (Groq's free-tier Whisper limit — roughly a 30–40 minute video at the bitrate used here). Longer videos return a clear error rather than failing silently.
+- **JavaScript-heavy websites**: some sites render their content client-side, which a server-side fetch can't see. The app falls back from `unstructured` to a direct HTML fetch, but genuinely JS-only content will still fail with a clear error message.
+- **Proxy dependency**: YouTube summarization on cloud deployments depends on a working residential proxy. If your proxy IP gets rotated/deallocated by your provider, update the `WEBSHARE_PROXY_ENDPOINT` secret with a fresh one from your dashboard.
+
+---
+
+## 🗺️ Possible Future Improvements
+
+- Support for additional languages (currently defaults to English captions/audio)
+- Headless-browser fallback (e.g. Playwright) for fully JS-rendered websites
+- Rotating across multiple proxy IPs automatically instead of relying on one static endpoint
+- Summary length/tone customization (e.g. executive summary vs. detailed notes)
+
+---
+
+
+
+## 🙋 Author
 
 **Vinay Rai**
 
