@@ -12,3 +12,4 @@ langchain_community
 # youtube_transcript_api
 yt-dlp
 groq
+beautifulsoup4

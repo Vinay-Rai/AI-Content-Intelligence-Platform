@@ -16,8 +16,6 @@ from langchain_community.document_loaders import UnstructuredURLLoader
 import tempfile
 import yt_dlp
 from groq import Groq
-import requests
-from bs4 import BeautifulSoup
 
 
 # Cache LLM
@@ -260,42 +258,6 @@ def load_youtube_transcript(url, api_key):
     return [Document(page_content=text, metadata={"source": url})]
 
 
-# Fallback website fetcher, used when UnstructuredURLLoader comes back empty
-# (common on JS-heavy sites or ones that subtly block scrapers).
-
-def fetch_website_fallback(url):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
-
-    response = requests.get(url, headers=headers, timeout=15, verify=False)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    # Strip elements that add noise, not content.
-    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-        tag.decompose()
-
-    text = soup.get_text(separator="\n")
-    # Collapse excess blank lines/whitespace.
-    lines = [line.strip() for line in text.splitlines()]
-    text = "\n".join(line for line in lines if line)
-
-    if not text.strip():
-        raise RuntimeError(
-            "This page appears to render its content with JavaScript, "
-            "or is blocking automated access. Try a different URL, or "
-            "paste the article text directly."
-        )
-
-    return [Document(page_content=text, metadata={"source": url})]
-
-
 # Button
 
 if st.button("Generate Summary"):
@@ -328,20 +290,10 @@ if st.button("Generate Summary"):
                         ssl_verify=False,
                         headers={
                             "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0.0.0 Safari/537.36"
+                            "Mozilla/5.0"
                         },
                     )
                     docs = loader.load()
-
-                    # UnstructuredURLLoader can silently return empty content
-                    # for JS-heavy sites or ones that block scrapers subtly.
-                    # Fall back to a direct fetch + parse before giving up.
-                    if not docs or not any(
-                        d.page_content.strip() for d in docs
-                    ):
-                        docs = fetch_website_fallback(generic_url)
 
                 if len(docs) == 0:
                     st.error("No content found.")
