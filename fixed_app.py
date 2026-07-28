@@ -197,8 +197,16 @@ def download_youtube_audio(url, workdir):
     webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
 
     if webshare_user and webshare_pass:
+        from urllib.parse import quote
+
+        encoded_user = quote(webshare_user, safe="")
+        encoded_pass = quote(webshare_pass, safe="")
+        # Use the specific proxy endpoint shown in your Webshare dashboard
+        # (Proxy -> List), not the general rotating gateway, since that
+        # wasn't matching your currently allocated proxy list.
+        proxy_endpoint = _get_secret("WEBSHARE_PROXY_ENDPOINT") or "31.59.20.176:6754"
         ydl_opts["proxy"] = (
-            f"http://{webshare_user}:{webshare_pass}@p.webshare.io:80"
+            f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
         )
     else:
         st.warning(
