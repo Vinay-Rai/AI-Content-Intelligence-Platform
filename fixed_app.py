@@ -13,9 +13,8 @@ from langchain_core.documents import Document
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import UnstructuredURLLoader
 
-import tempfile
-import yt_dlp
-from groq import Groq
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import GenericProxyConfig
 
 
 # Cache LLM
@@ -144,16 +143,9 @@ def clean_text_for_tts(text):
     return text.strip()
 
 
-# YouTube transcript loading via audio download + Groq Whisper transcription.
-# This avoids YouTube's transcript/caption endpoint entirely (the thing that
-# was getting IP-blocked / 429'd), by downloading the audio track and
-# transcribing it ourselves.
-
-# Groq's free-tier audio endpoint caps uploaded files at 25 MB, which is
-# roughly 30-40 minutes of compressed mono audio. Adjust if you're on a
-# paid Groq tier with a higher limit.
-MAX_AUDIO_MB = 25
-
+# YouTube transcript loading via youtube_transcript_api, routed through the
+# Webshare residential proxy (required on cloud hosting since YouTube blocks
+# datacenter IPs from hitting the transcript endpoint directly).
 
 def _get_secret(key):
     try:
@@ -164,94 +156,47 @@ def _get_secret(key):
     return os.environ.get(key)
 
 
-def download_youtube_audio(url, workdir):
-    output_template = os.path.join(workdir, "audio.%(ext)s")
+def extract_video_id(url):
+    match = re.search(r"(?:v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})", url)
+    return match.group(1) if match else None
 
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": output_template,
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "64",  # smaller file, plenty for speech
-            }
-        ],
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        # The default "web" client increasingly triggers 403s due to
-        # YouTube's signature/PO-token checks. The android/ios clients
-        # use a simpler API that avoids most of that.
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "ios", "web"],
-            }
-        },
-    }
 
-    # On cloud hosting, YouTube blocks datacenter IPs from downloading
-    # video/audio too (not just the transcript endpoint). Route through a
-    # Webshare residential proxy if credentials are configured.
+def load_youtube_transcript(url, api_key=None):
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise ValueError("Could not extract a video ID from that URL.")
+
     webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
     webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
+    # Use the specific proxy endpoint confirmed working in your Webshare
+    # dashboard (Proxy -> List). If it stops working later, the proxy was
+    # likely rotated out — grab a fresh IP:port from the dashboard and
+    # update the WEBSHARE_PROXY_ENDPOINT secret.
+    proxy_endpoint = _get_secret("WEBSHARE_PROXY_ENDPOINT") or "31.59.20.176:6754"
 
     if webshare_user and webshare_pass:
         from urllib.parse import quote
 
         encoded_user = quote(webshare_user, safe="")
         encoded_pass = quote(webshare_pass, safe="")
-        # Use the specific proxy endpoint shown in your Webshare dashboard
-        # (Proxy -> List), not the general rotating gateway, since that
-        # wasn't matching your currently allocated proxy list.
-        proxy_endpoint = _get_secret("WEBSHARE_PROXY_ENDPOINT") or "31.59.20.176:6754"
-        ydl_opts["proxy"] = (
-            f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
+        proxy_url = f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
+
+        ytt_api = YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(
+                http_url=proxy_url,
+                https_url=proxy_url,
+            )
         )
     else:
         st.warning(
-            "No Webshare proxy credentials found. YouTube audio downloads "
-            "from cloud hosting will likely be blocked (403) without a proxy."
+            "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
+            "WEBSHARE_PROXY_PASSWORD). YouTube transcript requests from cloud "
+            "hosting will likely be rate-limited (429) without a proxy."
         )
+        ytt_api = YouTubeTranscriptApi()
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    audio_path = os.path.join(workdir, "audio.mp3")
-    if not os.path.exists(audio_path):
-        raise RuntimeError("Audio download did not produce an output file.")
-
-    size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    if size_mb > MAX_AUDIO_MB:
-        raise RuntimeError(
-            f"Downloaded audio is {size_mb:.1f} MB, which exceeds the "
-            f"{MAX_AUDIO_MB} MB limit for transcription. Try a shorter video."
-        )
-
-    return audio_path
-
-
-def transcribe_audio_with_groq(audio_path, api_key):
-    client = Groq(api_key=api_key)
-
-    with open(audio_path, "rb") as f:
-        transcription = client.audio.transcriptions.create(
-            file=(os.path.basename(audio_path), f.read()),
-            model="whisper-large-v3-turbo",
-            response_format="text",
-        )
-
-    # response_format="text" returns a plain string in recent groq SDK
-    # versions; fall back to .text if a structured object is returned.
-    if isinstance(transcription, str):
-        return transcription
-    return getattr(transcription, "text", str(transcription))
-
-
-def load_youtube_transcript(url, api_key):
-    with tempfile.TemporaryDirectory() as workdir:
-        audio_path = download_youtube_audio(url, workdir)
-        text = transcribe_audio_with_groq(audio_path, api_key)
+    transcript = ytt_api.fetch(video_id)
+    text = " ".join(snippet.text for snippet in transcript)
 
     return [Document(page_content=text, metadata={"source": url})]
 
@@ -279,8 +224,8 @@ if st.button("Generate Summary"):
                     "youtube.com" in generic_url
                     or "youtu.be" in generic_url
                 ):
-                    with st.spinner("Downloading audio and transcribing..."):
-                        docs = load_youtube_transcript(generic_url, groq_api_key)
+                    with st.spinner("Fetching transcript..."):
+                        docs = load_youtube_transcript(generic_url)
 
                 else:
                     loader = UnstructuredURLLoader(
