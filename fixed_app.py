@@ -155,12 +155,20 @@ def load_youtube_transcript(url):
     if not video_id:
         raise ValueError("Could not extract a video ID from that URL.")
 
-    # If Webshare proxy credentials are set (as env vars or Streamlit secrets),
+    # If Webshare proxy credentials are set (as Streamlit secrets or env vars),
     # route the request through them. This is required on most cloud hosts
     # (Streamlit Cloud, AWS, GCP, etc.) since YouTube blocks those IP ranges
     # outright. Locally, it usually works fine without a proxy.
-    webshare_user = os.environ.get("WEBSHARE_PROXY_USERNAME")
-    webshare_pass = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+    def _get_secret(key):
+        try:
+            if key in st.secrets:
+                return st.secrets[key]
+        except Exception:
+            pass
+        return os.environ.get(key)
+
+    webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
+    webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
 
     if webshare_user and webshare_pass:
         ytt_api = YouTubeTranscriptApi(
@@ -170,6 +178,11 @@ def load_youtube_transcript(url):
             )
         )
     else:
+        st.warning(
+            "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
+            "WEBSHARE_PROXY_PASSWORD). YouTube transcript requests from cloud "
+            "hosting will likely be rate-limited (429) without a proxy."
+        )
         ytt_api = YouTubeTranscriptApi()
 
     transcript = ytt_api.fetch(video_id)
