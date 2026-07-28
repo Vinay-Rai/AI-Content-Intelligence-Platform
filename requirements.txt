@@ -11,3 +11,4 @@ edge_tts
 langchain_community
 # youtube_transcript_api
 yt-dlp
+groq

@@ -15,6 +15,7 @@ from langchain_community.document_loaders import UnstructuredURLLoader
 
 import tempfile
 import yt_dlp
+from groq import Groq
 
 
 # Cache LLM
@@ -143,10 +144,18 @@ def clean_text_for_tts(text):
     return text.strip()
 
 
-# YouTube transcript loading via yt-dlp's subtitle download (auto-generated
-# captions), routed through the Webshare proxy. This avoids the
-# youtube_transcript_api caption endpoint, which gets IP-blocked separately
-# and more aggressively than yt-dlp's general video-info access.
+# YouTube transcript loading via audio download + Groq Whisper transcription.
+# This avoids YouTube's caption/timedtext endpoint entirely (the endpoint
+# that keeps getting blocked, regardless of which library hits it), by
+# downloading the audio track and transcribing it ourselves. The general
+# video-playback path this uses has proven reliably accessible through the
+# proxy, unlike the caption endpoint.
+
+# Groq's free-tier audio endpoint caps uploaded files at 25 MB, which is
+# roughly 30-40 minutes of compressed mono audio. Adjust if you're on a
+# paid Groq tier with a higher limit.
+MAX_AUDIO_MB = 25
+
 
 def _get_secret(key):
     try:
@@ -172,89 +181,79 @@ def _build_proxy_url():
     return f"http://{encoded_user}:{encoded_pass}@{proxy_endpoint}"
 
 
-def _vtt_to_text(vtt_path):
-    """Strip VTT timing/formatting down to plain, deduplicated text."""
-    with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
+def download_youtube_audio(url, workdir):
+    output_template = os.path.join(workdir, "audio.%(ext)s")
 
-    text_lines = []
-    seen = set()
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": output_template,
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "64",  # smaller file, plenty for speech
+            }
+        ],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        # The default "web" client increasingly triggers 403s due to
+        # YouTube's signature/PO-token checks. The android/ios clients
+        # use a simpler API that avoids most of that.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web"],
+            }
+        },
+    }
 
-    for line in lines:
-        line = line.strip()
+    proxy_url = _build_proxy_url()
+    if proxy_url:
+        ydl_opts["proxy"] = proxy_url
+    else:
+        st.warning(
+            "No Webshare proxy credentials found. YouTube audio downloads "
+            "from cloud hosting will likely be blocked (403) without a proxy."
+        )
 
-        if not line:
-            continue
-        if line.startswith("WEBVTT"):
-            continue
-        if line.startswith(("Kind:", "Language:", "NOTE")):
-            continue
-        if "-->" in line:
-            continue
-        if re.match(r"^\d+$", line):
-            continue
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
 
-        # Strip inline timestamp tags like <00:00:01.234> and formatting tags
-        line = re.sub(r"<[^>]+>", "", line).strip()
+    audio_path = os.path.join(workdir, "audio.mp3")
+    if not os.path.exists(audio_path):
+        raise RuntimeError("Audio download did not produce an output file.")
 
-        if not line:
-            continue
+    size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    if size_mb > MAX_AUDIO_MB:
+        raise RuntimeError(
+            f"Downloaded audio is {size_mb:.1f} MB, which exceeds the "
+            f"{MAX_AUDIO_MB} MB limit for transcription. Try a shorter video."
+        )
 
-        # Auto-generated captions repeat the same line across overlapping
-        # windows; skip consecutive duplicates.
-        if line not in seen:
-            text_lines.append(line)
-            seen.add(line)
-
-    return " ".join(text_lines)
+    return audio_path
 
 
-def load_youtube_transcript(url, api_key=None):
+def transcribe_audio_with_groq(audio_path, api_key):
+    client = Groq(api_key=api_key)
+
+    with open(audio_path, "rb") as f:
+        transcription = client.audio.transcriptions.create(
+            file=(os.path.basename(audio_path), f.read()),
+            model="whisper-large-v3-turbo",
+            response_format="text",
+        )
+
+    # response_format="text" returns a plain string in recent groq SDK
+    # versions; fall back to .text if a structured object is returned.
+    if isinstance(transcription, str):
+        return transcription
+    return getattr(transcription, "text", str(transcription))
+
+
+def load_youtube_transcript(url, api_key):
     with tempfile.TemporaryDirectory() as workdir:
-        output_template = os.path.join(workdir, "subs.%(ext)s")
-
-        ydl_opts = {
-            "skip_download": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["en"],
-            "subtitlesformat": "vtt",
-            "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "web"],
-                }
-            },
-        }
-
-        proxy_url = _build_proxy_url()
-        if proxy_url:
-            ydl_opts["proxy"] = proxy_url
-        else:
-            st.warning(
-                "No Webshare proxy credentials found (WEBSHARE_PROXY_USERNAME / "
-                "WEBSHARE_PROXY_PASSWORD). YouTube requests from cloud hosting "
-                "will likely be blocked without a proxy."
-            )
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        vtt_files = [
-            f for f in os.listdir(workdir) if f.endswith(".vtt")
-        ]
-
-        if not vtt_files:
-            raise RuntimeError(
-                "No subtitles/captions were found for this video "
-                "(it may not have English captions available)."
-            )
-
-        vtt_path = os.path.join(workdir, vtt_files[0])
-        text = _vtt_to_text(vtt_path)
+        audio_path = download_youtube_audio(url, workdir)
+        text = transcribe_audio_with_groq(audio_path, api_key)
 
     return [Document(page_content=text, metadata={"source": url})]
 
@@ -282,8 +281,8 @@ if st.button("Generate Summary"):
                     "youtube.com" in generic_url
                     or "youtu.be" in generic_url
                 ):
-                    with st.spinner("Fetching transcript..."):
-                        docs = load_youtube_transcript(generic_url)
+                    with st.spinner("Downloading audio and transcribing..."):
+                        docs = load_youtube_transcript(generic_url, groq_api_key)
 
                 else:
                     loader = UnstructuredURLLoader(
