@@ -155,6 +155,15 @@ def clean_text_for_tts(text):
 MAX_AUDIO_MB = 25
 
 
+def _get_secret(key):
+    try:
+        if key in st.secrets:
+            return st.secrets[key]
+    except Exception:
+        pass
+    return os.environ.get(key)
+
+
 def download_youtube_audio(url, workdir):
     output_template = os.path.join(workdir, "audio.%(ext)s")
 
@@ -171,7 +180,31 @@ def download_youtube_audio(url, workdir):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        # The default "web" client increasingly triggers 403s due to
+        # YouTube's signature/PO-token checks. The android/ios clients
+        # use a simpler API that avoids most of that.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web"],
+            }
+        },
     }
+
+    # On cloud hosting, YouTube blocks datacenter IPs from downloading
+    # video/audio too (not just the transcript endpoint). Route through a
+    # Webshare residential proxy if credentials are configured.
+    webshare_user = _get_secret("WEBSHARE_PROXY_USERNAME")
+    webshare_pass = _get_secret("WEBSHARE_PROXY_PASSWORD")
+
+    if webshare_user and webshare_pass:
+        ydl_opts["proxy"] = (
+            f"http://{webshare_user}:{webshare_pass}@p.webshare.io:80"
+        )
+    else:
+        st.warning(
+            "No Webshare proxy credentials found. YouTube audio downloads "
+            "from cloud hosting will likely be blocked (403) without a proxy."
+        )
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
